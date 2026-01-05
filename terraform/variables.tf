@@ -16,6 +16,21 @@ variable "kafka_version" {
   default     = "3.6.1"
 }
 
+variable "public_subnets" {
+  description = "Public Subnets"
+  type        = list(string)
+}
+
+variable "private_subnets" {
+  description = "Public Subnets"
+  type        = list(string)
+}
+
+variable "azs" {
+  description = "Availability Zones"
+  type        = list(string)
+}
+
 variable "scala_version" {
   description = "Scala version"
   type        = string
