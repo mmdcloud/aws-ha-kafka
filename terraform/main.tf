@@ -235,48 +235,78 @@ resource "aws_iam_instance_profile" "kafka_instance_profile" {
 # -----------------------------------------------------------------------------------------
 # S3 Bucket for Backups
 # -----------------------------------------------------------------------------------------
-resource "aws_s3_bucket" "kafka_backups" {
-  bucket = "${var.environment}-kafka-backups-${data.aws_caller_identity.current.account_id}"
-
+module "kafka_backups" {
+  source             = "./modules/s3"
+  bucket_name        = "kafka-backups"
+  objects            = []
+  versioning_enabled = "Enabled"
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["GET"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    },
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  bucket_policy = ""
+  force_destroy = true
+  bucket_notification = {
+    queue           = []
+    lambda_function = []
+  }
   tags = {
-    Name = "${var.environment}-kafka-backups"
+    Name = "kafka-backups"
   }
 }
 
-resource "aws_s3_bucket_versioning" "kafka_backups_versioning" {
-  bucket = aws_s3_bucket.kafka_backups.id
+# resource "aws_s3_bucket" "kafka_backups" {
+#   bucket = "${var.environment}-kafka-backups-${data.aws_caller_identity.current.account_id}"
 
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
+#   tags = {
+#     Name = "${var.environment}-kafka-backups"
+#   }
+# }
 
-resource "aws_s3_bucket_server_side_encryption_configuration" "kafka_backups_encryption" {
-  bucket = aws_s3_bucket.kafka_backups.id
+# resource "aws_s3_bucket_versioning" "kafka_backups_versioning" {
+#   bucket = aws_s3_bucket.kafka_backups.id
 
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
+#   versioning_configuration {
+#     status = "Enabled"
+#   }
+# }
 
-resource "aws_s3_bucket_lifecycle_configuration" "kafka_backups_lifecycle" {
-  bucket = aws_s3_bucket.kafka_backups.id
+# resource "aws_s3_bucket_server_side_encryption_configuration" "kafka_backups_encryption" {
+#   bucket = aws_s3_bucket.kafka_backups.id
 
-  rule {
-    id     = "delete-old-backups"
-    status = "Enabled"
+#   rule {
+#     apply_server_side_encryption_by_default {
+#       sse_algorithm = "AES256"
+#     }
+#   }
+# }
 
-    expiration {
-      days = 30
-    }
+# resource "aws_s3_bucket_lifecycle_configuration" "kafka_backups_lifecycle" {
+#   bucket = aws_s3_bucket.kafka_backups.id
 
-    noncurrent_version_expiration {
-      noncurrent_days = 7
-    }
-  }
-}
+#   rule {
+#     id     = "delete-old-backups"
+#     status = "Enabled"
+
+#     expiration {
+#       days = 30
+#     }
+
+#     noncurrent_version_expiration {
+#       noncurrent_days = 7
+#     }
+#   }
+# }
 
 # -----------------------------------------------------------------------------------------
 # EBS Volumes for Kafka Data
@@ -334,15 +364,17 @@ module "zookeeper_logs" {
 # -----------------------------------------------------------------------------------------
 # Zookeeper Instances
 # -----------------------------------------------------------------------------------------
-resource "aws_instance" "zookeeper" {
-  count                  = var.zookeeper_count
-  ami                    = data.aws_ami.amazon_linux_2023.id
-  instance_type          = var.zookeeper_instance_type
-  key_name               = var.key_pair_name
-  subnet_id              = var.private_subnets[0]
-  vpc_security_group_ids = [module.zookeeper_sg.id]
-  iam_instance_profile   = aws_iam_instance_profile.kafka_instance_profile.name
-
+module "zookeeper" {
+  source                      = "./modules/ec2"
+  count                       = var.zookeeper_count
+  name                        = "${var.environment}-zookeeper-${count.index + 1}"
+  ami_id                      = data.aws_ami.amazon_linux_2023.id
+  instance_type               = var.zookeeper_instance_type
+  key_name                    = var.key_pair_name
+  subnet_id                   = var.private_subnets[0]
+  vpc_security_group_ids      = [module.zookeeper_sg.id]
+  associate_public_ip_address = false
+  instance_profile            = aws_iam_instance_profile.kafka_instance_profile.name
   user_data = base64encode(templatefile("${path.module}/scripts/zookeeper_userdata.sh", {
     ZOOKEEPER_ID      = count.index + 1
     ZOOKEEPER_SERVERS = join(",", [for i in range(var.zookeeper_count) : "server.${i + 1}=zookeeper-${i + 1}.kafka.local:2888:3888"])
@@ -351,24 +383,21 @@ resource "aws_instance" "zookeeper" {
     LOG_GROUP         = aws_cloudwatch_log_group.zookeeper_logs.name
     AWS_REGION        = var.aws_region
   }))
-
-  root_block_device {
+  root_block_device = {
     volume_type           = "gp3"
     volume_size           = 50
     encrypted             = true
     delete_on_termination = true
   }
-
   monitoring = var.enable_monitoring
-
   tags = {
     Name = "${var.environment}-zookeeper-${count.index + 1}"
     Role = "zookeeper"
   }
 
-  lifecycle {
-    ignore_changes = [user_data]
-  }
+  # lifecycle {
+  #   ignore_changes = [user_data]
+  # }
 }
 
 resource "aws_volume_attachment" "zookeeper_data_attachment" {
@@ -381,15 +410,17 @@ resource "aws_volume_attachment" "zookeeper_data_attachment" {
 # -----------------------------------------------------------------------------------------
 # Kafka Broker Instances
 # -----------------------------------------------------------------------------------------
-resource "aws_instance" "kafka_brokers" {
-  count                  = var.kafka_broker_count
-  ami                    = data.aws_ami.amazon_linux_2023.id
-  instance_type          = var.kafka_instance_type
-  key_name               = var.key_pair_name
-  subnet_id              = var.private_subnets[0]
-  vpc_security_group_ids = [module.kafka_brokers_sg.id]
-  iam_instance_profile   = aws_iam_instance_profile.kafka_instance_profile.name
-
+module "kafka_brokers" {
+  source                      = "./modules/ec2"
+  count                       = var.kafka_broker_count
+  name                        = "${var.environment}-kafka-broker-${count.index + 1}"
+  ami_id                      = data.aws_ami.amazon_linux_2023.id
+  instance_type               = var.kafka_instance_type
+  key_name                    = var.key_pair_name
+  subnet_id                   = var.private_subnets[0]
+  vpc_security_group_ids      = [module.kafka_brokers_sg.id]
+  associate_public_ip_address = false
+  instance_profile            = aws_iam_instance_profile.kafka_instance_profile.name
   user_data = base64encode(templatefile("${path.module}/scripts/kafka_userdata.sh", {
     BROKER_ID            = count.index + 1
     ZOOKEEPER_CONNECT    = join(",", [for i in range(var.zookeeper_count) : "zookeeper-${i + 1}.kafka.local:2181"])
@@ -400,26 +431,22 @@ resource "aws_instance" "kafka_brokers" {
     REPLICATION_FACTOR   = min(var.kafka_broker_count, 3)
     MIN_IN_SYNC_REPLICAS = max(floor(var.kafka_broker_count / 2), 1)
   }))
-
-  root_block_device {
+  root_block_device = {
     volume_type           = "gp3"
     volume_size           = 50
     encrypted             = true
     delete_on_termination = true
   }
-
   monitoring = var.enable_monitoring
-
   tags = {
     Name = "${var.environment}-kafka-broker-${count.index + 1}"
     Role = "kafka-broker"
   }
-
   depends_on = [aws_instance.zookeeper]
 
-  lifecycle {
-    ignore_changes = [user_data]
-  }
+  # lifecycle {
+  #   ignore_changes = [user_data]
+  # }
 }
 
 resource "aws_volume_attachment" "kafka_data_attachment" {
@@ -465,56 +492,101 @@ resource "aws_route53_record" "kafka_broker_records" {
 # -----------------------------------------------------------------------------------------
 # Application Load Balancer for Kafka (Optional)
 # -----------------------------------------------------------------------------------------
-resource "aws_lb" "kafka_nlb" {
-  name               = "${var.environment}-kafka-nlb"
-  internal           = true
-  load_balancer_type = "network"
-  subnets            = var.private_subnets
+module "kafka_nlb" {
+  source                           = "terraform-aws-modules/alb/aws"
+  name                             = "kafka-nlb"
+  load_balancer_type               = "network"
+  vpc_id                           = module.kafka_vpc.vpc_id
+  subnets                          = module.kafka_vpc.private_subnets
   enable_deletion_protection       = true
   enable_cross_zone_load_balancing = true
-
+  internal                         = true
+  security_groups = [
+    module.carshub_frontend_lb_sg.id
+  ]
+  access_logs = {
+    bucket = "${module.carshub_frontend_lb_logs.bucket}"
+  }
+  listeners = {
+    kafka_listener = {
+      port     = 9092
+      protocol = "TCP"
+      forward = {
+        target_group_key = "kafka_nlb_target_group"
+      }
+    }
+  }
+  target_groups = {
+    kafka_nlb_target_group = {
+      backend_protocol = "TCP"
+      backend_port     = 9092
+      vpc_id           = module.kafka_vpc.vpc_id
+      health_check = {
+        enabled             = true
+        protocol            = "TCP"
+        port                = 9092
+        healthy_threshold   = 3
+        unhealthy_threshold = 3
+        interval            = 30
+      }
+    }
+  }
   tags = {
-    Name = "${var.environment}-kafka-nlb"
+    Name = "kafka-nlb"
   }
+  depends_on = [module.kafka_vpc]
 }
 
-resource "aws_lb_target_group" "kafka_tg" {
-  name     = "${var.environment}-kafka-tg"
-  port     = 9092
-  protocol = "TCP"
-  vpc_id   = module.kafka_vpc.id
+# resource "aws_lb" "kafka_nlb" {
+#   name                             = "${var.environment}-kafka-nlb"
+#   internal                         = true
+#   load_balancer_type               = "network"
+#   subnets                          = var.private_subnets
+#   enable_deletion_protection       = true
+#   enable_cross_zone_load_balancing = true
 
-  health_check {
-    enabled             = true
-    protocol            = "TCP"
-    port                = 9092
-    healthy_threshold   = 3
-    unhealthy_threshold = 3
-    interval            = 30
-  }
+#   tags = {
+#     Name = "${var.environment}-kafka-nlb"
+#   }
+# }
 
-  tags = {
-    Name = "${var.environment}-kafka-tg"
-  }
-}
+# resource "aws_lb_target_group" "kafka_tg" {
+#   name     = "${var.environment}-kafka-tg"
+#   port     = 9092
+#   protocol = "TCP"
+#   vpc_id   = module.kafka_vpc.id
 
-resource "aws_lb_target_group_attachment" "kafka_tg_attachment" {
-  count            = var.kafka_broker_count
-  target_group_arn = aws_lb_target_group.kafka_tg.arn
-  target_id        = aws_instance.kafka_brokers[count.index].id
-  port             = 9092
-}
+#   health_check {
+#     enabled             = true
+#     protocol            = "TCP"
+#     port                = 9092
+#     healthy_threshold   = 3
+#     unhealthy_threshold = 3
+#     interval            = 30
+#   }
 
-resource "aws_lb_listener" "kafka_listener" {
-  load_balancer_arn = aws_lb.kafka_nlb.arn
-  port              = 9092
-  protocol          = "TCP"
+#   tags = {
+#     Name = "${var.environment}-kafka-tg"
+#   }
+# }
 
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.kafka_tg.arn
-  }
-}
+# resource "aws_lb_target_group_attachment" "kafka_tg_attachment" {
+#   count            = var.kafka_broker_count
+#   target_group_arn = aws_lb_target_group.kafka_tg.arn
+#   target_id        = aws_instance.kafka_brokers[count.index].id
+#   port             = 9092
+# }
+
+# resource "aws_lb_listener" "kafka_listener" {
+#   load_balancer_arn = aws_lb.kafka_nlb.arn
+#   port              = 9092
+#   protocol          = "TCP"
+
+#   default_action {
+#     type             = "forward"
+#     target_group_arn = aws_lb_target_group.kafka_tg.arn
+#   }
+# }
 
 # -----------------------------------------------------------------------------------------
 # Alarm Configuration
