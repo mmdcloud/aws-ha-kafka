@@ -5,6 +5,8 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+data "aws_elb_service_account" "main" {}
+
 data "aws_caller_identity" "current" {}
 
 data "aws_ami" "amazon_linux_2023" {
@@ -51,105 +53,194 @@ module "kafka_brokers_sg" {
   source = "./modules/security-groups"
   name   = "kafka-brokers-sg"
   vpc_id = module.kafka_vpc.vpc_id
+
+  # Only include rules that don't reference other security groups
   ingress_rules = [
     {
-      description = "Kafka broker communication"
-      from_port   = 9092
-      to_port     = 9092
-      protocol    = "tcp"
-      cidr_blocks = var.allowed_cidr_blocks
-    },
-    {
-      description = "Inter-broker communication"
-      from_port   = 9093
-      to_port     = 9093
-      protocol    = "tcp"
-      self        = true
-    },
-    {
-      description = "JMX monitoring"
-      from_port   = 9999
-      to_port     = 9999
-      protocol    = "tcp"
-      cidr_blocks = var.allowed_cidr_blocks
-    },
-    {
-      description = "SSH access"
-      from_port   = 22
-      to_port     = 22
-      protocol    = "tcp"
-      cidr_blocks = var.allowed_cidr_blocks
-    },
-    {
-      description     = "Zookeeper communication"
-      from_port       = 2181
-      to_port         = 2181
+      description     = "Kafka broker communication"
+      from_port       = 9092
+      to_port         = 9092
       protocol        = "tcp"
-      security_groups = [module.zookeeper_sg.id]
+      cidr_blocks     = var.allowed_cidr_blocks
+      security_groups = [] # Empty for now
+    },
+    {
+      description     = "Inter-broker communication"
+      from_port       = 9093
+      to_port         = 9093
+      protocol        = "tcp"
+      cidr_blocks     = []
+      self            = true
+      security_groups = []
+    },
+    {
+      description     = "JMX monitoring"
+      from_port       = 9999
+      to_port         = 9999
+      protocol        = "tcp"
+      cidr_blocks     = var.allowed_cidr_blocks
+      security_groups = []
+    },
+    {
+      description     = "SSH access"
+      from_port       = 22
+      to_port         = 22
+      protocol        = "tcp"
+      cidr_blocks     = var.allowed_cidr_blocks
+      security_groups = []
     }
   ]
+
   egress_rules = [
     {
       description     = "Allow outbound traffic to all"
       from_port       = 0
       to_port         = 0
-      protocol        = "tcp"
+      protocol        = "-1"
       cidr_blocks     = ["0.0.0.0/0"]
       security_groups = []
     }
   ]
+
   tags = {
     Name = "kafka-brokers-sg"
   }
 }
 
+# Create Zookeeper Security Group WITHOUT cross-references
 module "zookeeper_sg" {
   source = "./modules/security-groups"
   name   = "zookeeper-sg"
   vpc_id = module.kafka_vpc.vpc_id
+
+  # Only include rules that don't reference other security groups
   ingress_rules = [
     {
-      description     = "Zookeeper client port"
-      from_port       = 2181
-      to_port         = 2181
+      description     = "Zookeeper follower port"
+      from_port       = 2888
+      to_port         = 2888
       protocol        = "tcp"
-      security_groups = [module.kafka_brokers_sg.id]
+      cidr_blocks     = []
+      self            = true
+      security_groups = []
     },
     {
-      description = "Zookeeper follower port"
-      from_port   = 2888
-      to_port     = 2888
-      protocol    = "tcp"
-      self        = true
+      description     = "Zookeeper election port"
+      from_port       = 3888
+      to_port         = 3888
+      protocol        = "tcp"
+      cidr_blocks     = []
+      self            = true
+      security_groups = []
     },
     {
-      description = "Zookeeper election port"
-      from_port   = 3888
-      to_port     = 3888
-      protocol    = "tcp"
-      self        = true
-    },
-    {
-      description = "SSH access"
-      from_port   = 22
-      to_port     = 22
-      protocol    = "tcp"
-      cidr_blocks = var.allowed_cidr_blocks
+      description     = "SSH access"
+      from_port       = 22
+      to_port         = 22
+      protocol        = "tcp"
+      cidr_blocks     = var.allowed_cidr_blocks
+      security_groups = []
     }
   ]
+
   egress_rules = [
     {
       description     = "Allow outbound traffic to all"
       from_port       = 0
       to_port         = 0
-      protocol        = "tcp"
+      protocol        = "-1"
       cidr_blocks     = ["0.0.0.0/0"]
       security_groups = []
     }
   ]
+
   tags = {
-    Name = "kafka-brokers-sg"
+    Name = "zookeeper-sg"
   }
+}
+
+# -----------------------------------------------------------------------------------------
+# Security Group for Kafka NLB
+# -----------------------------------------------------------------------------------------
+module "kafka_nlb_sg" {
+  source = "./modules/security-groups"
+  name   = "kafka-nlb-sg"
+  vpc_id = module.kafka_vpc.vpc_id
+
+  ingress_rules = [
+    {
+      description     = "Kafka client connections"
+      from_port       = 9092
+      to_port         = 9092
+      protocol        = "tcp"
+      cidr_blocks     = var.allowed_cidr_blocks
+      security_groups = []
+    },
+    {
+      description     = "Kafka secure connections (TLS)"
+      from_port       = 9093
+      to_port         = 9093
+      protocol        = "tcp"
+      cidr_blocks     = var.allowed_cidr_blocks
+      security_groups = []
+    }
+  ]
+
+  egress_rules = [
+    {
+      description     = "Allow outbound to Kafka brokers"
+      from_port       = 9092
+      to_port         = 9092
+      protocol        = "tcp"
+      cidr_blocks     = []
+      security_groups = [module.kafka_brokers_sg.id]
+    },
+    {
+      description     = "Allow outbound to Kafka brokers (TLS)"
+      from_port       = 9093
+      to_port         = 9093
+      protocol        = "tcp"
+      cidr_blocks     = []
+      security_groups = [module.kafka_brokers_sg.id]
+    }
+  ]
+
+  tags = {
+    Name = "kafka-nlb-sg"
+  }
+}
+
+# Allow NLB to connect to Kafka brokers
+resource "aws_security_group_rule" "nlb_to_kafka_brokers" {
+  type                     = "ingress"
+  from_port                = 9092
+  to_port                  = 9092
+  protocol                 = "tcp"
+  source_security_group_id = module.kafka_nlb_sg.id
+  security_group_id        = module.kafka_brokers_sg.id
+  description              = "Allow NLB to connect to Kafka brokers"
+}
+
+# Allow Kafka brokers to connect to Zookeeper
+resource "aws_security_group_rule" "kafka_to_zookeeper" {
+  type                     = "ingress"
+  from_port                = 2181
+  to_port                  = 2181
+  protocol                 = "tcp"
+  source_security_group_id = module.kafka_brokers_sg.id
+  security_group_id        = module.zookeeper_sg.id
+  description              = "Allow Kafka brokers to connect to Zookeeper"
+}
+
+# Allow Zookeeper to accept connections from Kafka brokers
+resource "aws_security_group_rule" "zookeeper_to_kafka" {
+  type                     = "ingress"
+  from_port                = 2181
+  to_port                  = 2181
+  protocol                 = "tcp"
+  source_security_group_id = module.zookeeper_sg.id
+  security_group_id        = module.kafka_brokers_sg.id
+  description              = "Allow Zookeeper client connections from Kafka"
 }
 
 # -----------------------------------------------------------------------------------------
@@ -211,21 +302,24 @@ module "kafka_role" {
                 "Resource": "arn:aws:logs:*:*:*",
                 "Effect": "Allow"
             },
-            {
-                "Action": [
-                  "s3:GetObject",
-                  "s3:ListBucket"
-                ],
-                "Resource": [
-                    "${aws_s3_bucket.kafka_backups.arn}",
-                    "${aws_s3_bucket.kafka_backups.arn}/*"
-                ],
-                "Effect": "Allow"
-            }
+            
         ]
     }
     EOF
 }
+
+
+# {
+#                 "Action": [
+#                   "s3:GetObject",
+#                   "s3:ListBucket"
+#                 ],
+#                 "Resource": [
+#                     "${aws_s3_bucket.kafka_backups.arn}",
+#                     "${aws_s3_bucket.kafka_backups.arn}/*"
+#                 ],
+#                 "Effect": "Allow"
+#             }
 
 resource "aws_iam_instance_profile" "kafka_instance_profile" {
   name = "kafka-instance-profile"
@@ -344,21 +438,15 @@ resource "aws_ebs_volume" "zookeeper_data_volumes" {
 # CloudWatch Log Groups
 # -----------------------------------------------------------------------------------------
 module "kafka_logs" {
-  source            = "./modules/cloudwatch/cloudwatch-log-groups"
-  name              = "/aws/ec2/${var.environment}/kafka"
+  source            = "./modules/cloudwatch/cloudwatch-log-group"
+  log_group_name    = "/aws/ec2/${var.environment}/kafka"
   retention_in_days = 7
-  tags = {
-    Name = "kafka-logs"
-  }
 }
 
 module "zookeeper_logs" {
-  source            = "./modules/cloudwatch/cloudwatch-log-groups"
-  name              = "/aws/ec2/${var.environment}/zookeeper"
+  source            = "./modules/cloudwatch/cloudwatch-log-group"
+  log_group_name    = "/aws/ec2/${var.environment}/zookeeper"
   retention_in_days = 7
-  tags = {
-    Name = "zookeeper-logs"
-  }
 }
 
 # -----------------------------------------------------------------------------------------
@@ -376,12 +464,15 @@ module "zookeeper" {
   associate_public_ip_address = false
   instance_profile            = aws_iam_instance_profile.kafka_instance_profile.name
   user_data = base64encode(templatefile("${path.module}/scripts/zookeeper_userdata.sh", {
-    ZOOKEEPER_ID      = count.index + 1
-    ZOOKEEPER_SERVERS = join(",", [for i in range(var.zookeeper_count) : "server.${i + 1}=zookeeper-${i + 1}.kafka.local:2888:3888"])
-    KAFKA_VERSION     = var.kafka_version
-    SCALA_VERSION     = var.scala_version
-    LOG_GROUP         = aws_cloudwatch_log_group.zookeeper_logs.name
-    AWS_REGION        = var.aws_region
+    ZOOKEEPER_ID = count.index + 1
+    ZOOKEEPER_SERVERS = join(",", [
+      for i in range(var.zookeeper_count) :
+      "server.${i + 1}=zookeeper-${i + 1}.kafka.local:2888:3888"
+    ])
+    KAFKA_VERSION = var.kafka_version
+    SCALA_VERSION = var.scala_version
+    LOG_GROUP     = module.zookeeper_logs.name
+    AWS_REGION    = var.aws_region
   }))
   root_block_device = {
     volume_type           = "gp3"
@@ -404,7 +495,7 @@ resource "aws_volume_attachment" "zookeeper_data_attachment" {
   count       = var.zookeeper_count
   device_name = "/dev/xvdf"
   volume_id   = aws_ebs_volume.zookeeper_data_volumes[count.index].id
-  instance_id = aws_instance.zookeeper[count.index].id
+  instance_id = module.zookeeper[count.index].id
 }
 
 # -----------------------------------------------------------------------------------------
@@ -426,7 +517,7 @@ module "kafka_brokers" {
     ZOOKEEPER_CONNECT    = join(",", [for i in range(var.zookeeper_count) : "zookeeper-${i + 1}.kafka.local:2181"])
     KAFKA_VERSION        = var.kafka_version
     SCALA_VERSION        = var.scala_version
-    LOG_GROUP            = aws_cloudwatch_log_group.kafka_logs.name
+    LOG_GROUP            = module.kafka_logs.name
     AWS_REGION           = var.aws_region
     REPLICATION_FACTOR   = min(var.kafka_broker_count, 3)
     MIN_IN_SYNC_REPLICAS = max(floor(var.kafka_broker_count / 2), 1)
@@ -442,7 +533,7 @@ module "kafka_brokers" {
     Name = "${var.environment}-kafka-broker-${count.index + 1}"
     Role = "kafka-broker"
   }
-  depends_on = [aws_instance.zookeeper]
+  depends_on = [module.zookeeper]
 
   # lifecycle {
   #   ignore_changes = [user_data]
@@ -453,7 +544,7 @@ resource "aws_volume_attachment" "kafka_data_attachment" {
   count       = var.kafka_broker_count
   device_name = "/dev/xvdf"
   volume_id   = aws_ebs_volume.kafka_data_volumes[count.index].id
-  instance_id = aws_instance.kafka_brokers[count.index].id
+  instance_id = module.kafka_brokers[count.index].id
 }
 
 # -----------------------------------------------------------------------------------------
@@ -463,7 +554,7 @@ resource "aws_route53_zone" "kafka_private_zone" {
   name = "kafka.local"
 
   vpc {
-    vpc_id = module.kafka_vpc.id
+    vpc_id = module.kafka_vpc.vpc_id
   }
 
   tags = {
@@ -477,7 +568,7 @@ resource "aws_route53_record" "zookeeper_records" {
   name    = "zookeeper-${count.index + 1}.kafka.local"
   type    = "A"
   ttl     = 300
-  records = [aws_instance.zookeeper[count.index].private_ip]
+  records = [module.zookeeper[count.index].private_ip]
 }
 
 resource "aws_route53_record" "kafka_broker_records" {
@@ -486,12 +577,69 @@ resource "aws_route53_record" "kafka_broker_records" {
   name    = "kafka-broker-${count.index + 1}.kafka.local"
   type    = "A"
   ttl     = 300
-  records = [aws_instance.kafka_brokers[count.index].private_ip]
+  records = [module.kafka_brokers[count.index].private_ip]
 }
 
 # -----------------------------------------------------------------------------------------
 # Application Load Balancer for Kafka (Optional)
 # -----------------------------------------------------------------------------------------
+module "nlb_logs" {
+  source      = "./modules/s3"
+  bucket_name = "nlb-logs-${var.aws_region}"
+  objects     = []
+  bucket_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AWSLogDeliveryWrite"
+        Effect = "Allow"
+        Principal = {
+          Service = "logging.s3.amazonaws.com"
+        }
+        Action   = "s3:PutObject"
+        Resource = "arn:aws:s3:::nlb-logs-${var.aws_region}/*"
+      },
+      {
+        Sid    = "AWSLogDeliveryAclCheck"
+        Effect = "Allow"
+        Principal = {
+          Service = "logging.s3.amazonaws.com"
+        }
+        Action   = "s3:GetBucketAcl"
+        Resource = "arn:aws:s3:::nlb-logs-${var.aws_region}"
+      },
+      {
+        Sid    = "AWSELBAccountWrite"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_elb_service_account.main.id}:root"
+        }
+        Action   = "s3:PutObject"
+        Resource = "arn:aws:s3:::nlb-logs-${var.aws_region}/*"
+      }
+    ]
+  })
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["GET"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    },
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  versioning_enabled = "Enabled"
+  force_destroy      = true
+  tags = {
+    Name = "ha-kafka-nlb-logs"
+  }
+}
+
 module "kafka_nlb" {
   source                           = "terraform-aws-modules/alb/aws"
   name                             = "kafka-nlb"
@@ -502,10 +650,10 @@ module "kafka_nlb" {
   enable_cross_zone_load_balancing = true
   internal                         = true
   security_groups = [
-    module.carshub_frontend_lb_sg.id
+    module.kafka_nlb_sg.id
   ]
   access_logs = {
-    bucket = "${module.carshub_frontend_lb_logs.bucket}"
+    bucket = "${module.nlb_logs.bucket}"
   }
   listeners = {
     kafka_listener = {
@@ -620,7 +768,7 @@ module "kafka_cpu_alarm" {
   alarm_actions       = [module.alarm_notifications.topic_arn]
   ok_actions          = [module.alarm_notifications.topic_arn]
   dimensions = {
-    InstanceId = aws_instance.kafka_brokers[count.index].id
+    InstanceId = module.kafka_brokers[count.index].id
   }
 }
 
@@ -639,7 +787,7 @@ module "kafka_disk_alarm" {
   alarm_actions       = [module.alarm_notifications.topic_arn]
   ok_actions          = [module.alarm_notifications.topic_arn]
   dimensions = {
-    InstanceId = aws_instance.kafka_brokers[count.index].id
+    InstanceId = module.kafka_brokers[count.index].id
     path       = "/data"
   }
 }
