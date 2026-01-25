@@ -1,4 +1,4 @@
-# Apache Kafka Cluster on AWS - Terraform Infrastructure
+# 🚀 Apache Kafka Cluster on AWS - Terraform Infrastructure
 
 [![Terraform](https://img.shields.io/badge/Terraform-1.0+-623CE4?logo=terraform)](https://www.terraform.io/)
 [![AWS](https://img.shields.io/badge/AWS-Cloud-FF9900?logo=amazon-aws)](https://aws.amazon.com/)
