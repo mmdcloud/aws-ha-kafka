@@ -405,32 +405,93 @@ module "kafka_backups" {
 # -----------------------------------------------------------------------------------------
 # EBS Volumes for Kafka Data
 # -----------------------------------------------------------------------------------------
-resource "aws_ebs_volume" "kafka_data_volumes" {
-  count             = var.kafka_broker_count
-  availability_zone = data.aws_availability_zones.available.names[count.index % 3]
-  size              = 500
-  type              = "gp3"
-  iops              = 3000
-  throughput        = 125
-  encrypted         = true
+# resource "aws_ebs_volume" "kafka_data_volumes" {
+#   count             = var.kafka_broker_count
+#   availability_zone = data.aws_availability_zones.available.names[count.index % 3]
+#   size              = 500
+#   type              = "gp3"
+#   iops              = 3000
+#   throughput        = 125
+#   encrypted         = true
+
+#   tags = {
+#     Name   = "${var.environment}-kafka-broker-${count.index + 1}-data"
+#     Backup = "true"
+#   }
+# }
+
+module "kafka_ebs_volumes" {
+  source = "./modules/ebs"
+
+  enable_backup = var.enable_backup
+
+  # Create EBS volumes for each Kafka broker
+  volumes = {
+    for i in range(var.kafka_broker_count) : "kafka-broker-${i + 1}-data" => {
+      availability_zone = element(var.azs, i)
+      size              = var.kafka_data_volume_size
+      type              = var.kafka_data_volume_type
+      iops              = var.kafka_data_volume_type == "gp3" ? var.kafka_data_volume_iops : null
+      throughput        = var.kafka_data_volume_type == "gp3" ? var.kafka_data_volume_throughput : null
+      encrypted         = true
+      device_name       = "/dev/sdf"
+      instance_id       = module.kafka_brokers[i].id
+      enable_backup     = true
+      tags = {
+        Broker      = "kafka-broker-${i + 1}"
+        VolumeType  = "data"
+      }
+    }
+  }
 
   tags = {
-    Name   = "${var.environment}-kafka-broker-${count.index + 1}-data"
-    Backup = "true"
+    Environment = var.environment
+    Application = "kafka"
+    ManagedBy   = "terraform"
   }
 }
 
-resource "aws_ebs_volume" "zookeeper_data_volumes" {
-  count             = var.zookeeper_count
-  availability_zone = data.aws_availability_zones.available.names[count.index % 3]
-  size              = 100
-  type              = "gp3"
-  iops              = 3000
-  encrypted         = true
+# resource "aws_ebs_volume" "zookeeper_data_volumes" {
+#   count             = var.zookeeper_count
+#   availability_zone = data.aws_availability_zones.available.names[count.index % 3]
+#   size              = 100
+#   type              = "gp3"
+#   iops              = 3000
+#   encrypted         = true
+
+#   tags = {
+#     Name   = "${var.environment}-zookeeper-${count.index + 1}-data"
+#     Backup = "true"
+#   }
+# }
+
+module "zookeeper_ebs_volumes" {
+  source = "./modules/ebs"
+
+  enable_backup = var.enable_backup
+
+  volumes = {
+    for i in range(var.zookeeper_count) : "zookeeper-node-${i + 1}-data" => {
+      availability_zone = element(var.azs, i)
+      size              = var.zookeeper_data_volume_size
+      type              = "gp3"
+      iops              = 3000
+      throughput        = 125
+      encrypted         = true
+      device_name       = "/dev/sdf"
+      instance_id       = module.zookeeper_nodes[i].id
+      enable_backup     = true
+      tags = {
+        Node       = "zookeeper-node-${i + 1}"
+        VolumeType = "data"
+      }
+    }
+  }
 
   tags = {
-    Name   = "${var.environment}-zookeeper-${count.index + 1}-data"
-    Backup = "true"
+    Environment = var.environment
+    Application = "zookeeper"
+    ManagedBy   = "terraform"
   }
 }
 
@@ -850,42 +911,104 @@ module "dlm_lifecycle_role" {
     EOF
 }
 
-resource "aws_dlm_lifecycle_policy" "kafka_backup_policy" {
-  count              = var.enable_backup ? 1 : 0
-  description        = "Kafka EBS backup policy"
+# resource "aws_dlm_lifecycle_policy" "kafka_backup_policy" {
+#   count              = var.enable_backup ? 1 : 0
+#   description        = "Kafka EBS backup policy"
+#   execution_role_arn = module.dlm_lifecycle_role.arn
+#   state              = "ENABLED"
+
+#   policy_details {
+#     resource_types = ["VOLUME"]
+
+#     schedule {
+#       name = "Daily Kafka Backups"
+
+#       create_rule {
+#         interval      = 24
+#         interval_unit = "HOURS"
+#         times         = ["03:00"]
+#       }
+
+#       retain_rule {
+#         count = 7
+#       }
+
+#       tags_to_add = {
+#         SnapshotCreator = "DLM"
+#         Environment     = var.environment
+#       }
+
+#       copy_tags = true
+#     }
+
+#     target_tags = {
+#       Backup = "true"
+#     }
+#   }
+
+#   tags = {
+#     Name = "kafka-backup-policy"
+#   }
+# }
+
+module "kafka_backup_policy" {
+  source = "./modules/dlm"
+
+  enabled            = var.enable_backup
+  name               = "kafka-backup-policy"
+  description        = "Automated backup policy for Kafka EBS volumes"
   execution_role_arn = module.dlm_lifecycle_role.arn
   state              = "ENABLED"
 
-  policy_details {
-    resource_types = ["VOLUME"]
+  resource_types = ["VOLUME"]
 
-    schedule {
+  # Target all volumes tagged with Backup = "true"
+  target_tags = {
+    Backup = "true"
+  }
+
+  # Multiple schedules for different retention periods
+  schedules = [
+    {
       name = "Daily Kafka Backups"
-
-      create_rule {
+      create_rule = {
         interval      = 24
         interval_unit = "HOURS"
-        times         = ["03:00"]
+        times         = ["03:00"]  # 3 AM UTC
       }
-
-      retain_rule {
-        count = 7
+      retain_rule = {
+        count = 7  # Keep 7 daily snapshots
       }
-
       tags_to_add = {
         SnapshotCreator = "DLM"
-        Environment     = var.environment
+        Type           = "Daily"
       }
-
+      copy_tags = true
+    },
+    {
+      name = "Weekly Kafka Backups"
+      create_rule = {
+        cron_expression = "cron(0 2 ? * SUN *)"  # Every Sunday at 2 AM UTC
+      }
+      retain_rule = {
+        count = 4  # Keep 4 weekly snapshots
+      }
+      tags_to_add = {
+        SnapshotCreator = "DLM"
+        Type           = "Weekly"
+      }
       copy_tags = true
     }
+  ]
 
-    target_tags = {
-      Backup = "true"
-    }
+  common_tags_to_add = {
+    Environment = var.environment
+    Application = "kafka"
   }
 
   tags = {
-    Name = "kafka-backup-policy"
+    Name        = "kafka-backup-policy"
+    Environment = var.environment
+    ManagedBy   = "terraform"
   }
 }

@@ -55,6 +55,12 @@ variable "zookeeper_count" {
   default     = 3
 }
 
+variable "zookeeper_data_volume_size" {
+  description = "Size of Zookeeper data volume in GB"
+  type        = number
+  default     = 100
+}
+
 variable "zookeeper_instance_type" {
   description = "EC2 instance type for Zookeeper"
   type        = string
